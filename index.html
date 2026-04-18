@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumen Weave</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="./favicon.svg"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <canvas id="scene" aria-hidden="true"></canvas>
+
+    <aside class="hud" id="hud">
+      <p class="eyebrow">Audio-Reactive Canvas Study</p>
+      <h1>Lumen Weave</h1>
+      <p class="lede">
+        This version listens first. Feed it a microphone, a track, or the demo
+        signal and the whole field retunes around bass, mids, and treble. Now
+        it can jump between several visual scenes instead of one fixed look.
+      </p>
+
+      <div class="panel">
+        <div class="group">
+          <p class="group-label">Audio Source</p>
+          <div class="actions actions--compact">
+            <button id="micButton" type="button">Mic</button>
+            <button id="trackButton" type="button">Track</button>
+            <button id="demoButton" type="button">Demo</button>
+            <button id="stopAudioButton" type="button">Stop</button>
+          </div>
+          <input id="audioFile" type="file" accept="audio/*" hidden />
+          <p class="status" id="audioStatus">
+            Source idle. Start a signal and the field will lock onto it.
+          </p>
+        </div>
+
+        <label class="slider">
+          <span>Tension</span>
+          <input
+            id="tension"
+            type="range"
+            min="0.4"
+            max="2.2"
+            step="0.1"
+            value="1.2"
+          />
+        </label>
+
+        <label class="slider">
+          <span>Audio Drive</span>
+          <input
+            id="drive"
+            type="range"
+            min="0.8"
+            max="2.4"
+            step="0.1"
+            value="1.4"
+          />
+        </label>
+
+        <div class="actions">
+          <button id="paletteButton" type="button">Palette</button>
+          <button id="modeButton" type="button">Mode: Flow</button>
+          <button id="clearButton" type="button">Clear</button>
+          <button id="pauseButton" type="button">Freeze</button>
+        </div>
+      </div>
+
+      <p class="meta" id="meta">Scene: Flow | Palette: Solar | Source: idle | Energy: 0%</p>
+      <p class="keys">
+        Keys: <span>M</span> mic <span>U</span> upload <span>D</span> demo
+        <span>N</span> scene <span>1-5</span> direct <span>Space</span> palette
+        <span>C</span> clear <span>H</span> hide HUD
+      </p>
+    </aside>
+
+    <script type="module" src="./script.js"></script>
+  </body>
+</html>
