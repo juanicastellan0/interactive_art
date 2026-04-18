@@ -67,14 +67,45 @@
           <button id="modeButton" type="button">Mode: Flow</button>
           <button id="clearButton" type="button">Clear</button>
           <button id="pauseButton" type="button">Freeze</button>
+          <button id="debugButton" type="button" aria-pressed="false">Debug</button>
         </div>
+
+        <div class="group group--dense">
+          <p class="group-label">Scene Library</p>
+          <div class="selector-grid selector-grid--scenes" id="sceneSelector" aria-label="Scene selector"></div>
+        </div>
+
+        <div class="group group--dense">
+          <p class="group-label">Palette Library</p>
+          <div class="selector-grid selector-grid--palettes" id="paletteSelector" aria-label="Palette selector"></div>
+        </div>
+
+        <div class="group group--dense">
+          <p class="group-label">Presets And Export</p>
+          <div class="actions">
+            <button id="presetButton" type="button">Preset: Undertow</button>
+            <button id="autoPresetButton" type="button" aria-pressed="false">Auto Presets</button>
+            <button id="exportImageButton" type="button">PNG</button>
+            <button id="exportPresetButton" type="button">Preset JSON</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="debug-panel" id="debugPanel" hidden>
+        <p class="group-label">Baseline Debug</p>
+        <p class="debug-line" id="debugSummary">Debug disabled.</p>
+        <p class="debug-line" id="debugStages"></p>
+        <p class="debug-line" id="debugAudio"></p>
+        <p class="debug-line" id="debugEvents"></p>
       </div>
 
       <p class="meta" id="meta">Scene: Flow | Palette: Solar | Source: idle | Energy: 0%</p>
       <p class="keys">
         Keys: <span>M</span> mic <span>U</span> upload <span>D</span> demo
-        <span>N</span> scene <span>1-5</span> direct <span>Space</span> palette
-        <span>C</span> clear <span>H</span> hide HUD
+        <span>N</span> scene <span>1-9</span> direct <span>Space</span> palette
+        <span>R</span> preset <span>A</span> auto <span>E</span> PNG
+        <span>J</span> preset JSON <span>C</span> clear <span>H</span> hide HUD
+        <span>P</span> debug
       </p>
     </aside>
 
