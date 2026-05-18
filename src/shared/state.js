@@ -99,6 +99,9 @@ function createAudioState() {
     trackName: "",
     currentTime: 0,
     duration: 0,
+    isPlaying: false,
+    waveform: [],
+    waveformPending: false,
     status: "Source idle. Start a signal and the field will lock onto it.",
     detector: createAdaptiveDetectorState(),
     events: {

@@ -1,8 +1,9 @@
-import { createAudioController } from "../audio/index.js";
-import { createRenderController } from "../render/index.js";
-import { palettes, createVisualModes } from "../scenes/index.js";
-import { chooseAutoPreset, presets } from "../shared/presets.js";
-import { createInitialState } from "../shared/state.js";
+import { createAudioController } from "../audio/index.js?v=20260418d";
+import { createRenderController } from "../render/index.js?v=20260418";
+import { palettes, createVisualModes } from "../scenes/index.js?v=20260418";
+import { clamp } from "../shared/math.js?v=20260418d";
+import { chooseAutoPreset, presets } from "../shared/presets.js?v=20260418";
+import { createInitialState } from "../shared/state.js?v=20260418";
 
 function queryDom() {
   return {
@@ -16,6 +17,27 @@ function queryDom() {
     stopAudioButton: document.querySelector("#stopAudioButton"),
     audioFileInput: document.querySelector("#audioFile"),
     audioStatus: document.querySelector("#audioStatus"),
+    trackPanel: document.querySelector("#trackPanel"),
+    trackTitle: document.querySelector("#trackTitle"),
+    trackTime: document.querySelector("#trackTime"),
+    trackPreview: document.querySelector("#trackPreview"),
+    trackWaveform: document.querySelector("#trackWaveform"),
+    trackNeedle: document.querySelector("#trackNeedle"),
+    trackProgress: document.querySelector("#trackProgress"),
+    trackCurrentTime: document.querySelector("#trackCurrentTime"),
+    trackHoverTime: document.querySelector("#trackHoverTime"),
+    trackDurationTime: document.querySelector("#trackDurationTime"),
+    trackDetailPreview: document.querySelector("#trackDetailPreview"),
+    trackDetailWaveform: document.querySelector("#trackDetailWaveform"),
+    trackDetailProgress: document.querySelector("#trackDetailProgress"),
+    trackDetailNeedle: document.querySelector("#trackDetailNeedle"),
+    trackWindowRange: document.querySelector("#trackWindowRange"),
+    trackWindowStart: document.querySelector("#trackWindowStart"),
+    trackWindowLabel: document.querySelector("#trackWindowLabel"),
+    trackWindowEnd: document.querySelector("#trackWindowEnd"),
+    seekBackButton: document.querySelector("#seekBackButton"),
+    trackPlayButton: document.querySelector("#trackPlayButton"),
+    seekForwardButton: document.querySelector("#seekForwardButton"),
     paletteButton: document.querySelector("#paletteButton"),
     modeButton: document.querySelector("#modeButton"),
     sceneSelector: document.querySelector("#sceneSelector"),
@@ -46,6 +68,13 @@ function formatPercent(value) {
 
 function formatEventAge(ageMs) {
   return ageMs < 1000 ? `${Math.round(ageMs)}ms` : `${(ageMs / 1000).toFixed(1)}s`;
+}
+
+function formatClock(seconds) {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = Math.floor(safeSeconds % 60);
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
 function describeRecentEvents(state, now) {
@@ -85,6 +114,10 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1200);
 }
 
+function isInteractiveTarget(target) {
+  return target instanceof HTMLElement && Boolean(target.closest("button, input, [role='slider']"));
+}
+
 const PALETTE_COPY = {
   Solar: "ember glow and warm dusk",
   Reef: "teal surf and cooler depth",
@@ -97,6 +130,12 @@ const PALETTE_COPY = {
   Ochre: "amber dust and kiln heat",
   Rosefire: "rose flare and crimson smoke",
 };
+
+const TRACK_SKIP_SECONDS = 10;
+const TRACK_KEYBOARD_SKIP_SECONDS = 5;
+const EMPTY_TRACK_WAVEFORM = Array.from({ length: 96 }, (_, index) =>
+  clamp(0.2 + Math.sin(index * 0.42) * 0.08 + Math.sin(index * 1.17) * 0.035, 0.08, 0.34),
+);
 
 export function startApp() {
   const dom = queryDom();
@@ -129,6 +168,227 @@ export function startApp() {
 
   let sceneOptionButtons = [];
   let paletteOptionButtons = [];
+  let trackHoverRatio = null;
+  let trackHoverMessage = "";
+  let renderedTrackWaveformKey = "";
+  let renderedTrackDetailKey = "";
+
+  function getWaveformBarCount(element, { min = 24, max = 72, density = 6 } = {}) {
+    const width = element?.clientWidth || 0;
+    if (!width) {
+      return min;
+    }
+
+    return clamp(Math.floor(width / density), min, max);
+  }
+
+  function getTrackWaveformBarCount() {
+    const width = dom.trackPreview.clientWidth || 0;
+    const density = width < 220 ? 2.1 : width < 320 ? 2.5 : 3.1;
+    return getWaveformBarCount(dom.trackPreview, {
+      min: 48,
+      max: 144,
+      density,
+    });
+  }
+
+  function getTrackDetailBarCount() {
+    return getWaveformBarCount(dom.trackDetailPreview, {
+      min: 28,
+      max: 160,
+      density: dom.trackDetailPreview.clientWidth < 420 ? 4.2 : 3.5,
+    });
+  }
+
+  function downsampleTrackWaveform(peaks, targetCount) {
+    if (peaks.length <= targetCount) {
+      return peaks;
+    }
+
+    const segmentSize = peaks.length / targetCount;
+    return Array.from({ length: targetCount }, (_, index) => {
+      const start = Math.floor(index * segmentSize);
+      const end = Math.max(start + 1, Math.floor((index + 1) * segmentSize));
+      let maxPeak = 0;
+      let total = 0;
+      let count = 0;
+
+      for (let cursor = start; cursor < Math.min(end, peaks.length); cursor += 1) {
+        maxPeak = Math.max(maxPeak, peaks[cursor]);
+        total += peaks[cursor];
+        count += 1;
+      }
+
+      const average = count ? total / count : 0;
+      return clamp(maxPeak * 0.68 + average * 0.32, 0.08, 1);
+    });
+  }
+
+  function createWaveformBars(peaks, barClassName, variableName) {
+    const bars = peaks.map((peak) => {
+      const bar = document.createElement("span");
+      bar.className = barClassName;
+      bar.style.setProperty(variableName, peak.toFixed(3));
+      return bar;
+    });
+
+    return bars;
+  }
+
+  function renderTrackWaveform(peaks, { placeholder = false, loading = false } = {}) {
+    dom.trackWaveform.classList.toggle("is-placeholder", placeholder);
+    dom.trackWaveform.classList.toggle("is-loading", loading);
+    const bars = createWaveformBars(peaks, "track-waveform__bar", "--track-bar");
+    dom.trackWaveform.replaceChildren(...bars);
+  }
+
+  function renderTrackDetailWaveform(peaks) {
+    const bars = createWaveformBars(peaks, "track-detail__bar", "--track-detail-bar");
+    dom.trackDetailWaveform.replaceChildren(...bars);
+  }
+
+  function getTrackFocusWindow(peaks, focusRatio, windowFraction = 0.18) {
+    if (!peaks.length) {
+      return {
+        peaks,
+        startIndex: 0,
+        endIndex: 0,
+        startRatio: 0,
+        endRatio: 0,
+        localRatio: 0,
+      };
+    }
+
+    const total = peaks.length;
+    const windowSize = clamp(Math.round(total * windowFraction), 24, total);
+    const focusIndex = Math.round(clamp(focusRatio, 0, 1) * Math.max(total - 1, 1));
+    const maxStart = Math.max(0, total - windowSize);
+    const startIndex = clamp(focusIndex - Math.floor(windowSize / 2), 0, maxStart);
+    const endIndex = Math.min(total, startIndex + windowSize);
+    const localRatio = windowSize > 1 ? (focusIndex - startIndex) / (windowSize - 1) : 0;
+
+    return {
+      peaks: peaks.slice(startIndex, endIndex),
+      startIndex,
+      endIndex,
+      startRatio: total > 1 ? startIndex / (total - 1) : 0,
+      endRatio: total > 1 ? Math.max(startIndex, endIndex - 1) / (total - 1) : 0,
+      localRatio: clamp(localRatio, 0, 1),
+    };
+  }
+
+  function getTrackProgressRatio() {
+    if (!state.audio.duration) {
+      return 0;
+    }
+
+    return clamp(state.audio.currentTime / state.audio.duration, 0, 1);
+  }
+
+  function clearTrackHover() {
+    trackHoverRatio = null;
+    trackHoverMessage = "";
+  }
+
+  function setTrackHover(ratio, { scrubbing = false } = {}) {
+    if (!state.audio.duration) {
+      clearTrackHover();
+      return;
+    }
+
+    const safeRatio = clamp(ratio, 0, 1);
+    trackHoverRatio = safeRatio;
+    const nextTime = state.audio.duration * safeRatio;
+    trackHoverMessage = `${scrubbing ? "Scrubbing" : "Jump"} to ${formatClock(nextTime)}`;
+  }
+
+  function syncTrackUi() {
+    const hasTrack = state.audio.mode === "track";
+    const progress = getTrackProgressRatio();
+    const sourcePeaks = state.audio.waveform.length ? state.audio.waveform : EMPTY_TRACK_WAVEFORM;
+    const focusRatio = hasTrack ? (trackHoverRatio ?? progress) : 0;
+    const overviewBarCount = getTrackWaveformBarCount();
+    const renderedPeaks = downsampleTrackWaveform(sourcePeaks, overviewBarCount);
+    const waveformKey = `${state.audio.trackName}:${state.audio.waveformPending}:${state.audio.waveform.length}:${hasTrack}:${overviewBarCount}`;
+    const windowFraction = dom.hud.clientWidth > 1100 ? 0.14 : dom.hud.clientWidth > 820 ? 0.18 : 0.24;
+    const focusWindow = getTrackFocusWindow(sourcePeaks, focusRatio, windowFraction);
+    const detailBarCount = getTrackDetailBarCount();
+    const detailPeaks = downsampleTrackWaveform(
+      focusWindow.peaks.length ? focusWindow.peaks : EMPTY_TRACK_WAVEFORM,
+      detailBarCount,
+    );
+    const detailKey =
+      `${state.audio.trackName}:${state.audio.waveformPending}:${state.audio.waveform.length}:` +
+      `${focusWindow.startIndex}:${focusWindow.endIndex}:${detailBarCount}:${hasTrack}`;
+
+    if (renderedTrackWaveformKey !== waveformKey) {
+      renderTrackWaveform(renderedPeaks, {
+        placeholder: !state.audio.waveform.length,
+        loading: state.audio.waveformPending,
+      });
+      renderedTrackWaveformKey = waveformKey;
+    } else {
+      dom.trackWaveform.classList.toggle("is-placeholder", !state.audio.waveform.length);
+      dom.trackWaveform.classList.toggle("is-loading", state.audio.waveformPending);
+    }
+
+    if (renderedTrackDetailKey !== detailKey) {
+      renderTrackDetailWaveform(detailPeaks);
+      renderedTrackDetailKey = detailKey;
+    }
+
+    if (!hasTrack) {
+      clearTrackHover();
+    }
+
+    dom.trackPanel.classList.toggle("is-active", hasTrack);
+    dom.trackTitle.textContent = hasTrack
+      ? state.audio.trackName || "Untitled track"
+      : "Load a local track to unlock waveform scrubbing.";
+    dom.trackTime.textContent = `${formatClock(state.audio.currentTime)} / ${formatClock(state.audio.duration)}`;
+    dom.trackCurrentTime.textContent = formatClock(state.audio.currentTime);
+    dom.trackDurationTime.textContent = formatClock(state.audio.duration);
+    dom.trackPlayButton.textContent = state.audio.isPlaying ? "Pause" : "Play";
+    dom.trackPreview.tabIndex = hasTrack ? 0 : -1;
+    dom.trackPreview.setAttribute("aria-disabled", String(!hasTrack));
+    dom.trackPreview.setAttribute("aria-valuemin", "0");
+    dom.trackPreview.setAttribute("aria-valuemax", String(Math.round(state.audio.duration || 0)));
+    dom.trackPreview.setAttribute("aria-valuenow", String(Math.round(state.audio.currentTime || 0)));
+    dom.trackPreview.setAttribute(
+      "aria-valuetext",
+      `${formatClock(state.audio.currentTime)} of ${formatClock(state.audio.duration)}`,
+    );
+    dom.trackPreview.style.setProperty("--track-progress", `${(progress * 100).toFixed(2)}%`);
+    dom.trackDetailPreview.style.setProperty("--track-detail-progress", `${(focusWindow.localRatio * 100).toFixed(2)}%`);
+    dom.trackWindowStart.textContent = formatClock(state.audio.duration * focusWindow.startRatio);
+    dom.trackWindowEnd.textContent = formatClock(state.audio.duration * focusWindow.endRatio);
+    dom.trackWindowRange.textContent =
+      `${formatClock(state.audio.duration * focusWindow.startRatio)} - ${formatClock(state.audio.duration * focusWindow.endRatio)}`;
+    dom.trackWindowLabel.textContent = hasTrack
+      ? trackHoverRatio !== null
+        ? `Zoom around ${formatClock(state.audio.duration * focusRatio)}.`
+        : "Zoom around the playhead."
+      : "Load a track to inspect a local detail window.";
+
+    if (trackHoverRatio !== null && hasTrack) {
+      dom.trackPreview.classList.add("has-hover");
+      dom.trackPreview.style.setProperty("--track-hover", `${(trackHoverRatio * 100).toFixed(2)}%`);
+    } else {
+      dom.trackPreview.classList.remove("has-hover");
+    }
+
+    dom.trackHoverTime.textContent =
+      trackHoverMessage ||
+      (state.audio.waveformPending
+        ? "Analyzing the waveform..."
+        : hasTrack
+          ? "Click or drag to choose where playback jumps."
+          : "Load a local track to scrub visually.");
+
+    dom.seekBackButton.disabled = !hasTrack;
+    dom.trackPlayButton.disabled = !hasTrack;
+    dom.seekForwardButton.disabled = !hasTrack;
+  }
 
   function updateSelectorSelection() {
     sceneOptionButtons.forEach((button, index) => {
@@ -495,6 +755,7 @@ export function startApp() {
       const warmupMs = mode === "track" ? 3600 : mode === "demo" ? 2400 : 1800;
       state.auto.blockUntil = performance.now() + warmupMs;
       state.auto.lastHandledEventAt = 0;
+      syncTrackUi();
 
       if (mode === "idle") {
         updateMeta();
@@ -502,12 +763,31 @@ export function startApp() {
     },
   });
 
+  function getTrackRatioFromClientX(clientX) {
+    const rect = dom.trackPreview.getBoundingClientRect();
+    if (!rect.width) {
+      return 0;
+    }
+
+    return clamp((clientX - rect.left) / rect.width, 0, 1);
+  }
+
+  function seekTrackToRatio(ratio) {
+    if (!state.audio.duration) {
+      return;
+    }
+
+    audioController.seekTrack(state.audio.duration * clamp(ratio, 0, 1));
+    syncTrackUi();
+  }
+
   renderer.configure({
     nextPalettes: palettes,
     nextVisualModes: visualModes,
     nextAudioController: audioController,
     nextHudFrame: () => {
       updateMeta();
+      syncTrackUi();
       syncDebugUi();
     },
   });
@@ -515,10 +795,135 @@ export function startApp() {
   window.lumenState = state;
   window.toggleLumenDebug = () => setDebugEnabled(!state.debug.enabled);
   renderSelectionLibraries();
+  syncTrackUi();
 
-  window.addEventListener("resize", renderer.fitCanvas);
+  let activeTrackPointerId = null;
+
+  function releaseTrackPointer(pointerId) {
+    if (pointerId === null || typeof dom.trackPreview.releasePointerCapture !== "function") {
+      return;
+    }
+
+    try {
+      if (dom.trackPreview.hasPointerCapture(pointerId)) {
+        dom.trackPreview.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // Ignore pointer capture edge cases.
+    }
+  }
+
+  function finishTrackScrub(pointerId) {
+    releaseTrackPointer(pointerId);
+    activeTrackPointerId = null;
+    dom.trackPreview.classList.remove("is-scrubbing");
+    clearTrackHover();
+    syncTrackUi();
+  }
+
+  dom.trackPreview.addEventListener("pointerdown", (event) => {
+    if (!state.audio.duration) {
+      return;
+    }
+
+    activeTrackPointerId = event.pointerId;
+    dom.trackPreview.classList.add("is-scrubbing");
+    if (typeof dom.trackPreview.setPointerCapture === "function") {
+      dom.trackPreview.setPointerCapture(event.pointerId);
+    }
+    const ratio = getTrackRatioFromClientX(event.clientX);
+    setTrackHover(ratio, { scrubbing: true });
+    seekTrackToRatio(ratio);
+    event.preventDefault();
+  });
+
+  dom.trackPreview.addEventListener("pointermove", (event) => {
+    if (!state.audio.duration) {
+      return;
+    }
+
+    const ratio = getTrackRatioFromClientX(event.clientX);
+    if (activeTrackPointerId === event.pointerId) {
+      setTrackHover(ratio, { scrubbing: true });
+      seekTrackToRatio(ratio);
+      return;
+    }
+
+    setTrackHover(ratio);
+    syncTrackUi();
+  });
+
+  dom.trackPreview.addEventListener("pointerleave", () => {
+    if (activeTrackPointerId !== null) {
+      return;
+    }
+
+    clearTrackHover();
+    syncTrackUi();
+  });
+
+  dom.trackPreview.addEventListener("pointerup", (event) => {
+    if (activeTrackPointerId !== event.pointerId) {
+      return;
+    }
+
+    finishTrackScrub(event.pointerId);
+  });
+
+  dom.trackPreview.addEventListener("pointercancel", (event) => {
+    if (activeTrackPointerId !== event.pointerId) {
+      return;
+    }
+
+    finishTrackScrub(event.pointerId);
+  });
+
+  dom.trackPreview.addEventListener("keydown", async (event) => {
+    if (!state.audio.duration) {
+      return;
+    }
+
+    const key = event.key;
+
+    if (key === "ArrowLeft") {
+      event.preventDefault();
+      audioController.skipTrack(-TRACK_KEYBOARD_SKIP_SECONDS);
+    } else if (key === "ArrowRight") {
+      event.preventDefault();
+      audioController.skipTrack(TRACK_KEYBOARD_SKIP_SECONDS);
+    } else if (key === "PageDown") {
+      event.preventDefault();
+      audioController.skipTrack(-TRACK_SKIP_SECONDS);
+    } else if (key === "PageUp") {
+      event.preventDefault();
+      audioController.skipTrack(TRACK_SKIP_SECONDS);
+    } else if (key === "Home") {
+      event.preventDefault();
+      audioController.seekTrack(0);
+    } else if (key === "End") {
+      event.preventDefault();
+      audioController.seekTrack(state.audio.duration);
+    } else if (key === " " || key === "Enter") {
+      event.preventDefault();
+      await audioController.toggleTrackPlayback();
+    } else {
+      return;
+    }
+
+    clearTrackHover();
+    syncTrackUi();
+  });
+
+  window.addEventListener("resize", () => {
+    renderer.fitCanvas();
+    syncTrackUi();
+  });
 
   window.addEventListener("keydown", (event) => {
+    if (isInteractiveTarget(event.target)) {
+      return;
+    }
+
     const key = event.key.toLowerCase();
 
     if (event.key === " ") {
@@ -576,11 +981,29 @@ export function startApp() {
   dom.micButton.addEventListener("click", audioController.startMic);
   dom.trackButton.addEventListener("click", () => dom.audioFileInput.click());
   dom.demoButton.addEventListener("click", audioController.startDemo);
-  dom.stopAudioButton.addEventListener("click", () => audioController.stopAudioSource());
+  dom.stopAudioButton.addEventListener("click", () => {
+    clearTrackHover();
+    audioController.stopAudioSource();
+  });
   dom.audioFileInput.addEventListener("change", async (event) => {
     const [file] = event.target.files;
     event.target.value = "";
     await audioController.startTrack(file);
+  });
+  dom.seekBackButton.addEventListener("click", () => {
+    clearTrackHover();
+    audioController.skipTrack(-TRACK_SKIP_SECONDS);
+    syncTrackUi();
+  });
+  dom.trackPlayButton.addEventListener("click", async () => {
+    clearTrackHover();
+    await audioController.toggleTrackPlayback();
+    syncTrackUi();
+  });
+  dom.seekForwardButton.addEventListener("click", () => {
+    clearTrackHover();
+    audioController.skipTrack(TRACK_SKIP_SECONDS);
+    syncTrackUi();
   });
   dom.paletteButton.addEventListener("click", cyclePalette);
   dom.modeButton.addEventListener("click", () => cycleMode());
@@ -596,6 +1019,7 @@ export function startApp() {
   renderer.fitCanvas();
   updateMeta();
   syncPresetUi();
+  syncTrackUi();
   syncDebugUi(true);
   renderer.start();
 }

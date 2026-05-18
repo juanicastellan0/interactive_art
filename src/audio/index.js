@@ -1,4 +1,4 @@
-import { averageBins, clamp, lerp } from "../shared/math.js";
+import { averageBins, clamp, lerp } from "../shared/math.js?v=20260418d";
 
 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 
@@ -145,11 +145,41 @@ const EVENT_ACTIVITY_KEY = {
   "silence-break": "silenceBreak",
 };
 
+const TRACK_WAVEFORM_BINS = 640;
+
 function createAudioElement() {
   const element = new Audio();
   element.preload = "auto";
   element.loop = true;
   return element;
+}
+
+function buildTrackWaveform(audioBuffer, binCount = TRACK_WAVEFORM_BINS) {
+  const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) => audioBuffer.getChannelData(index));
+  const blockSize = Math.max(1, Math.floor(audioBuffer.length / binCount));
+
+  const peaks = Array.from({ length: binCount }, (_, index) => {
+    const start = index * blockSize;
+    const end = index === binCount - 1 ? audioBuffer.length : Math.min(audioBuffer.length, start + blockSize);
+    const sampleStep = Math.max(1, Math.floor((end - start) / 96));
+    let peak = 0;
+
+    for (const channel of channels) {
+      for (let cursor = start; cursor < end; cursor += sampleStep) {
+        peak = Math.max(peak, Math.abs(channel[cursor]));
+      }
+    }
+
+    return peak;
+  });
+
+  const peakMax = Math.max(...peaks, 0.001);
+  return peaks.map((value, index) => {
+    const previous = peaks[index - 1] ?? value;
+    const next = peaks[index + 1] ?? value;
+    const smoothed = (previous * 0.18 + value * 0.64 + next * 0.18) / peakMax;
+    return clamp(Math.pow(smoothed, 0.72), 0.08, 1);
+  });
 }
 
 export function createAudioController({
@@ -160,6 +190,53 @@ export function createAudioController({
   onSourceChange = () => {},
 }) {
   const audioElement = createAudioElement();
+  let trackPreviewToken = 0;
+
+  function syncTrackPlaybackState() {
+    if (state.audio.mode !== "track") {
+      state.audio.isPlaying = false;
+      return;
+    }
+
+    state.audio.currentTime = audioElement.currentTime || 0;
+    if (Number.isFinite(audioElement.duration) && audioElement.duration > 0) {
+      state.audio.duration = audioElement.duration;
+    }
+    state.audio.isPlaying = !audioElement.paused && !audioElement.ended;
+  }
+
+  async function buildTrackPreview(file) {
+    const token = ++trackPreviewToken;
+    state.audio.waveformPending = true;
+    state.audio.waveform = [];
+
+    try {
+      const fileBuffer = await file.arrayBuffer();
+      const decoded = await state.audio.context.decodeAudioData(fileBuffer.slice(0));
+
+      if (token !== trackPreviewToken || state.audio.trackName !== file.name) {
+        return;
+      }
+
+      state.audio.waveform = buildTrackWaveform(decoded);
+
+      if (!state.audio.duration && Number.isFinite(decoded.duration)) {
+        state.audio.duration = decoded.duration;
+      }
+    } catch {
+      if (token === trackPreviewToken) {
+        state.audio.waveform = [];
+      }
+    } finally {
+      if (token === trackPreviewToken) {
+        state.audio.waveformPending = false;
+      }
+    }
+  }
+
+  for (const eventName of ["loadedmetadata", "timeupdate", "play", "pause", "seeking", "seeked"]) {
+    audioElement.addEventListener(eventName, syncTrackPlaybackState);
+  }
 
   function pushAdaptiveEvent(type, strength, now = performance.now(), band = null) {
     const activityKey = EVENT_ACTIVITY_KEY[type];
@@ -273,6 +350,7 @@ export function createAudioController({
     state.audio.pulse *= 0.92;
     state.audio.currentTime = 0;
     state.audio.duration = 0;
+    state.audio.isPlaying = false;
 
     for (let i = 0; i < state.audio.spectrum.length; i += 1) {
       state.audio.spectrum[i] = lerp(state.audio.spectrum[i], 0, 0.08);
@@ -426,10 +504,7 @@ export function createAudioController({
     analyser.getByteFrequencyData(freqData);
     analyser.getByteTimeDomainData(timeData);
 
-    if (state.audio.mode === "track") {
-      state.audio.currentTime = audioElement.currentTime || 0;
-      state.audio.duration = Number.isFinite(audioElement.duration) ? audioElement.duration : 0;
-    }
+    syncTrackPlaybackState();
 
     const drive = state.drive;
     const bassRaw = averageBins(freqData, 1, freqData.length * 0.08) / 255;
@@ -484,6 +559,8 @@ export function createAudioController({
   }
 
   async function stopAudioSource(message = "Source idle. Start a signal and the field will lock onto it.") {
+    trackPreviewToken += 1;
+
     if (state.audio.cleanup) {
       state.audio.cleanup();
       state.audio.cleanup = null;
@@ -519,6 +596,9 @@ export function createAudioController({
     state.audio.trackName = "";
     state.audio.currentTime = 0;
     state.audio.duration = 0;
+    state.audio.isPlaying = false;
+    state.audio.waveform = [];
+    state.audio.waveformPending = false;
     resetDetectorLevels();
     syncSourceButtons();
     setStatus(message);
@@ -665,6 +745,8 @@ export function createAudioController({
       state.audio.sourceNode = source;
       state.audio.mode = "mic";
       state.audio.trackName = "";
+      state.audio.waveform = [];
+      state.audio.waveformPending = false;
       armDetectorWarmup();
       syncSourceButtons();
       setStatus("Microphone live. Use localhost or https so the browser can grant access.");
@@ -702,7 +784,11 @@ export function createAudioController({
       state.audio.sourceNode = state.audio.mediaElementSource;
       state.audio.mode = "track";
       state.audio.trackName = file.name;
+      state.audio.waveform = [];
+      state.audio.waveformPending = true;
       armDetectorWarmup();
+      syncTrackPlaybackState();
+      void buildTrackPreview(file);
       syncSourceButtons();
       setStatus(`Track loaded: ${file.name}`);
       onSourceChange({
@@ -724,6 +810,8 @@ export function createAudioController({
       state.audio.cleanup = createDemoGraph(state.audio.context);
       state.audio.mode = "demo";
       state.audio.trackName = "";
+      state.audio.waveform = [];
+      state.audio.waveformPending = false;
       armDetectorWarmup();
       syncSourceButtons();
       setStatus("Demo signal active. It is synthetic, but the visuals are reading the same analyser path as mic and track modes.");
@@ -739,11 +827,48 @@ export function createAudioController({
     }
   }
 
+  async function toggleTrackPlayback() {
+    if (state.audio.mode !== "track") {
+      return;
+    }
+
+    await ensureAudioReady();
+
+    if (audioElement.paused) {
+      await audioElement.play();
+    } else {
+      audioElement.pause();
+    }
+
+    syncTrackPlaybackState();
+  }
+
+  function seekTrack(nextTimeSeconds) {
+    if (state.audio.mode !== "track") {
+      return;
+    }
+
+    const duration = Number.isFinite(audioElement.duration) && audioElement.duration > 0 ? audioElement.duration : state.audio.duration;
+    if (!duration) {
+      return;
+    }
+
+    audioElement.currentTime = clamp(nextTimeSeconds, 0, duration);
+    syncTrackPlaybackState();
+  }
+
+  function skipTrack(deltaSeconds) {
+    seekTrack((audioElement.currentTime || 0) + deltaSeconds);
+  }
+
   return {
     readAudioFeatures,
     startMic,
     startTrack,
     startDemo,
     stopAudioSource,
+    toggleTrackPlayback,
+    seekTrack,
+    skipTrack,
   };
 }
